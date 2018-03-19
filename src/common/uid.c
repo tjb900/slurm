@@ -362,8 +362,9 @@ extern int slurm_valid_uid_gid(uid_t uid, gid_t *gid, char **user_name,
 {
 	struct passwd pwd, *result;
 	char buffer[PW_BUF_SIZE];
+	char grp_buffer[PW_BUF_SIZE];
 	int rc;
-	struct group *grp;
+	struct group grp;
 	int i;
 
 	/* already verified */
@@ -387,8 +388,19 @@ extern int slurm_valid_uid_gid(uid_t uid, gid_t *gid, char **user_name,
 	if (result->pw_gid == *gid)
 		return 1;
 
-	if (!(grp = getgrgid(*gid))) {
-		error("gid %ld not found on system", (long)(*gid));
+	struct group *grp_result;
+	rc = _getgrgid_r(*gid, &grp, grp_buffer, PW_BUF_SIZE, &grp_result);
+
+	/* We need to check for !grp_result, since it appears some
+	 * versions of this function do not return an error on failure
+	 */
+	if (rc != 0 || !grp_result) {
+		if (rc == ERANGE) {
+			error("alert! PW_BUF_SIZE was insufficient for group %ld", (long)(*gid));
+		} else {
+			error("gid %ld not found on system (error %d)", (long)(*gid), rc);
+		}
+
 		slurm_seterrno(ESLURMD_GID_NOT_FOUND);
 		return 0;
 	}
@@ -399,12 +411,17 @@ extern int slurm_valid_uid_gid(uid_t uid, gid_t *gid, char **user_name,
 		return 1;
 	}
 
-	for (i = 0; grp->gr_mem[i]; i++) {
-		if (!xstrcmp(result->pw_name, grp->gr_mem[i])) {
+	for (i = 0; grp_result->gr_mem[i]; i++) {
+		if (!xstrcmp(result->pw_name, grp_result->gr_mem[i])) {
 			result->pw_gid = *gid;
 			return 1;
 		}
 	}
+
+	debug("couldn't find user %s in group %ld, falling back to enumeration",
+		result->pw_name ? result->pw_name : "(null)",
+		(long)(*gid));
+
 	if (*gid != 0) {
 		if (slurm_find_group_user(result, *gid))
 			return 1;
